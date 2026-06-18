@@ -3,8 +3,6 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-import cv2
-import numpy as np
 import pandas as pd
 import streamlit as st
 import yaml
@@ -178,79 +176,32 @@ def image_to_temp_file(image: Image.Image) -> str:
         return temp_file.name
 
 
-def draw_detections(image: Image.Image, result, show_boxes: bool, show_labels: bool, line_width: int) -> Image.Image:
-    canvas = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
-    names = result.names
-    for box in result.boxes:
-        cls_id = int(box.cls[0].item())
-        class_name = str(names.get(cls_id, f"Class {cls_id}"))
-        confidence = float(box.conf[0].item())
-        xmin, ymin, xmax, ymax = [int(value) for value in box.xyxy[0].tolist()]
-        color = (25, 135, 84) if "helmet" in class_name.lower() else (35, 75, 220)
-
-        if show_boxes:
-            cv2.rectangle(canvas, (xmin, ymin), (xmax, ymax), color, line_width)
-        if show_labels:
-            label = f"{class_name} {confidence:.2f}"
-            cv2.putText(canvas, label, (xmin, max(24, ymin - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
-
-    return Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
-
-
 def run_prediction(model: YOLO, image: Image.Image, options: dict) -> tuple[Image.Image, pd.DataFrame]:
     image_path = image_to_temp_file(image)
-    results = model.predict(source=image_path, conf=options["confidence"], verbose=False)
-    result = results[0]
-    annotated = draw_detections(
-        image=image,
-        result=result,
-        show_boxes=options["show_boxes"],
-        show_labels=options["show_labels"],
-        line_width=options["line_width"],
+
+    results = model.predict(
+        source=image_path,
+        conf=options["confidence"],
+        verbose=False
     )
 
-    rows = []
-    for box in result.boxes:
-        cls_id = int(box.cls[0].item())
-        class_name = str(result.names.get(cls_id, f"Class {cls_id}"))
-        confidence = float(box.conf[0].item())
-        xmin, ymin, xmax, ymax = [float(value) for value in box.xyxy[0].tolist()]
-        rows.append(
-            {
-                "Class": class_name,
-                "Confidence": round(confidence * 100, 2),
-                "Xmin": round(xmin, 1),
-                "Ymin": round(ymin, 1),
-                "Xmax": round(xmax, 1),
-                "Ymax": round(ymax, 1),
-            }
-        )
-    return annotated, pd.DataFrame(rows)
-
-
-def predict_frame(model: YOLO, frame: np.ndarray, options: dict) -> tuple[np.ndarray, pd.DataFrame]:
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    image = Image.fromarray(rgb_frame)
-    annotated, predictions = run_prediction(model, image, options)
-    return np.array(annotated), predictions
-
-
-def draw_frame_detections(model: YOLO, frame: np.ndarray, options: dict) -> tuple[np.ndarray, pd.DataFrame]:
-    results = model.predict(source=frame, conf=options["confidence"], verbose=False)
     result = results[0]
-    annotated = frame.copy()
+
+    # YOLO automatically draws boxes and labels
+    annotated = Image.fromarray(result.plot()[:, :, ::-1])
+
     rows = []
 
     for box in result.boxes:
         cls_id = int(box.cls[0].item())
         class_name = str(result.names.get(cls_id, f"Class {cls_id}"))
         confidence = float(box.conf[0].item())
-        xmin, ymin, xmax, ymax = [int(value) for value in box.xyxy[0].tolist()]
-        color = (25, 135, 84) if "helmet" in class_name.lower() else (35, 75, 220)
 
-        cv2.rectangle(annotated, (xmin, ymin), (xmax, ymax), color, options["line_width"])
-        label = f"{class_name} {confidence:.2f}"
-        cv2.putText(annotated, label, (xmin, max(24, ymin - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
+        xmin, ymin, xmax, ymax = [
+            float(value)
+            for value in box.xyxy[0].tolist()
+        ]
+
         rows.append(
             {
                 "Class": class_name,
@@ -262,17 +213,7 @@ def draw_frame_detections(model: YOLO, frame: np.ndarray, options: dict) -> tupl
             }
         )
 
-    cv2.putText(
-        annotated,
-        "Press Q to quit",
-        (16, 32),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        (255, 255, 255),
-        2,
-    )
     return annotated, pd.DataFrame(rows)
-
 
 def show_prediction_summary(predictions: pd.DataFrame, empty_message: str = "No helmet detected.") -> None:
     if predictions.empty:
@@ -282,51 +223,6 @@ def show_prediction_summary(predictions: pd.DataFrame, empty_message: str = "No 
     best_row = predictions.sort_values("Confidence", ascending=False).iloc[0]
     st.success(f"Helmet detected with {best_row['Confidence']:.2f}% confidence.")
     st.dataframe(predictions, hide_index=True, use_container_width=True)
-
-
-def live_capture_detection(model: YOLO, options: dict) -> None:
-    st.subheader("Live Capturing")
-    st.write("Click the button to open a separate OpenCV camera window and run live helmet detection.")
-
-    capture_col, info_col = st.columns([1, 1])
-    with capture_col:
-        start_capture = st.button("Start Live Capturing", type="primary", use_container_width=True)
-    with info_col:
-        st.info("A camera window will open outside the browser. Press Q in that OpenCV window to stop.")
-
-    if not start_capture:
-        return
-
-    cap = cv2.VideoCapture(0)
-    if not cap.isOpened():
-        st.error("Could not open camera. Check webcam permission or connect a camera.")
-        return
-
-    last_predictions = pd.DataFrame()
-    frame_count = 0
-    window_name = "Helmet Detection - Press Q to Quit"
-
-    try:
-        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-        while True:
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                st.error("Camera opened, but no frame was captured. Please try again.")
-                break
-
-            annotated_frame, last_predictions = draw_frame_detections(model, frame, options)
-            cv2.imshow(window_name, annotated_frame)
-            frame_count += 1
-
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
-    finally:
-        cap.release()
-        cv2.destroyAllWindows()
-
-    st.write(f"OpenCV live capture completed. Processed {frame_count} frames.")
-    show_prediction_summary(last_predictions, "No helmet detected in the last camera frame.")
-
 
 def sidebar() -> str:
     st.sidebar.title("Helmet Detection")
@@ -341,7 +237,7 @@ def sidebar() -> str:
         st.sidebar.success("best_model/best.pt found")
     else:
         st.sidebar.error("Model missing")
-    st.sidebar.caption("Upload an image or use live camera capture from Test Detection.")
+    st.sidebar.caption("Upload an image from Test Detection.")
     return page
 
 
@@ -382,27 +278,12 @@ def project_overview() -> None:
 
 def test_detection(model: YOLO, options: dict) -> None:
     st.title("Test Detection")
+
     st.markdown(
-        '<div class="muted">Choose image upload or live camera capture, then run the YOLO26n detector.</div>',
+        '<div class="muted">Upload an image and run the YOLO helmet detector.</div>',
         unsafe_allow_html=True
     )
 
-    detection_mode = st.radio(
-        "Detection option",
-        ["Upload Image", "Live Capturing"],
-        horizontal=True
-    )
-
-    # ==================================================
-    # LIVE CAPTURE
-    # ==================================================
-    if detection_mode == "Live Capturing":
-        live_capture_detection(model, options)
-        return
-
-    # ==================================================
-    # UPLOAD + BUTTON IN SAME ROW (50%-50%)
-    # ==================================================
     upload_col, button_col = st.columns([1, 1])
 
     with upload_col:
@@ -426,9 +307,6 @@ def test_detection(model: YOLO, options: dict) -> None:
 
     image = Image.open(uploaded_file).convert("RGB")
 
-    # ==================================================
-    # BEFORE DETECTION
-    # ==================================================
     if not detect_btn:
         left_col, right_col = st.columns(2)
 
@@ -441,6 +319,43 @@ def test_detection(model: YOLO, options: dict) -> None:
             st.info("Press Detect Helmet to run the model.")
 
         return
+
+    with st.spinner("Running YOLO inference..."):
+        annotated, predictions = run_prediction(
+            model,
+            image,
+            options
+        )
+
+    left_col, right_col = st.columns(2)
+
+    with left_col:
+        st.subheader("Uploaded Image")
+        st.image(image, use_container_width=True)
+
+    with right_col:
+        st.subheader("Detection Result")
+        st.image(annotated, use_container_width=True)
+
+    st.markdown("---")
+
+    if predictions.empty:
+        st.error("No helmet detected in this image.")
+    else:
+        best_row = predictions.sort_values(
+            "Confidence",
+            ascending=False
+        ).iloc[0]
+
+        st.success(
+            f"Helmet detected with {best_row['Confidence']:.2f}% confidence."
+        )
+
+        st.dataframe(
+            predictions,
+            hide_index=True,
+            use_container_width=True
+        )
 
     # ==================================================
     # RUN DETECTION
